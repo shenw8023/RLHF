@@ -1,8 +1,33 @@
 # TRL库实现代码的理解
 
 """
+
+- 初始化actor_model，ref_model，reward_model
+- 采样一批query，用actor_model生成response，使用reward_model计算出句子的score
+
+- ppo_trainer.step(query_tensors, response_tensors, rewards)
+  - 输入为query+response，分别利用actor_model和ref_model 计算出个token的**logprob**和**ref_logprob**
+    - （注意是with torch.no_grad()）
+    - logprob shape为 (B, reponse_len)，每个元素表示是正确token对应的log_prob，是teacher_forcing的感觉
+  - 输入为query+response，利用critic_model算出每个token对应的V值（该项目将critic和actor合在一起，所以一次性输出了）
+    - V值表示该token往后的累积total Reward的期望
+    - （注意是with torch.no_grad()）
+    - V的shape为 (B,reponse_len)
+  - 计算产出每个token的即时奖励——compute_rewards
+    - 本项目实现中，非最后一个token用kl作为即时奖励，最后一个token的即时奖励是kl + score，其中score是Reward_model输出的整个句子的分数
+    - 虽然即时奖励看起来只有最后一个token获得了实际的评分奖励，但通过GAE（Generalized Advantage Estimation）的计算，这个奖励信号会被传播到前面的所有token
+
+
+"""
+
+
+
+
+
+
+"""
 # PPO计算流程
-- 通过actor_mode计算每个位置的 logprobs 和 values
+- 通过actor_model计算每个位置的 logprobs 和 values （本项目将actor_model和reward_model合在一起了）
 - 通过ref_model计算每个位置的 ref_logprobs
 - 通过reward_model计算每句话的总分 scores
 
@@ -39,7 +64,7 @@
 # 疑问
 - value_loss的计算公式不太明白
   - value_loss 就应该等于critic产生的预测值 v_pred 和真实值 r + v_next 之间的差值
-  - 这个真实值怎么理解，它不也就是上一轮中的critic预测的值吗这里的v_next也是一个变量呀，难度是因为用r做了修正，我们希望更新critic，使得他的输出更符合v = r + v_next
+  - 这个真实值怎么理解，它不也就是上一轮中的critic预测的值吗这里的v_next也是一个变量呀，难道是因为用r做了修正，我们希望更新critic，使得他的输出更符合v = r + v_next
 
 - 计算每个位置的reward，为什么最后一个位置是句子的score，其他位置是KL-penalty
 
@@ -184,7 +209,7 @@ class PPOTrainer:
                                      values - self.ppo_params["cliprange_value"],
                                      values + self.ppo_params["cliprange_value"])
 
-        vf_losses1 = (vpred - returns)**2                # v - (r + v_next - v + v)
+        vf_losses1 = (vpred - returns)**2                #[ ] v - (r+v_next) = v - (r + v_next - v + v) = v - returns  ; 核心就是希望让advantage越来越小，当actor趋向最优的时候，就没有优势了
         vf_losses2 = (vpredclipped - returns)**2         # value loss clipped
         vf_loss = .5 * torch.mean(torch.max(vf_losses1, vf_losses2))
         vf_clipfrac =  torch.mean(torch.gt(vf_losses2, vf_losses1).double())

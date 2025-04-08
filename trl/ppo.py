@@ -87,7 +87,7 @@ class PPOTrainer:
                 'lr' (float): Adam learning rate, default: 1.41e-5
                 'batch_size' (int): Number of samples per optimisation step, default: 256
                 'forward_batch_size' (int): Number of samples forward passed through model at a time, default: 16 #[ ]
-                'ppo_epochs' (int): Number of optimisation epochs per batch of samples, default: 4 #[ ]
+                'ppo_epochs' (int): Number of optimization epochs per batch of samples, default: 4 #[ ]
                 'gamma' (float)): Gamma parameter for advantage calculation, default: 1.
                 'lam' (float): Lambda parameter for advantage calcualation, default: 0.95
                 'cliprange_value' (float): Range for clipping values in loss calculation, default: 0.2
@@ -110,7 +110,7 @@ class PPOTrainer:
         self.optimizer = Adam(model.parameters(), lr=self.ppo_params['lr'])
 
         if self.ppo_params['adap_kl_ctrl']:
-            self.kl_ctl = AdaptiveKLController(self.ppo_params['init_kl_coef'],
+            self.kl_ctl = AdaptiveKLController(self.ppo_params['init_kl_coef'], #TODO
                                                self.ppo_params['target'],
                                                self.ppo_params['horizon'])
         else:
@@ -124,7 +124,7 @@ class PPOTrainer:
         args:
             queries (List): List of tensors containing the encoded queries, shape [query_length]
             responses (List): List of tensors containing the encoded responses, shape [response_length]
-            scores (List): tensor containing the scores, shape [batch_size]
+            scores (List): tensor containing the scores, shape [batch_size]，表示句子的得分
 
         returns:
             train_stats (dict): a summary of the training statistics
@@ -139,7 +139,7 @@ class PPOTrainer:
         response_lengths = [len(r) for r in responses]
 
         t = time.time()
-        logprobs, ref_logprobs, values = self.batched_forward_pass(queries, responses)          # 拿到模型生成的tokens的log_prob、token_value
+        logprobs, ref_logprobs, values = self.batched_forward_pass(queries, responses)          # 拿到模型生成的tokens的logprobs、ref_logprobs,token_value
         timing['time/ppo/forward_pass'] = time.time()-t
 
         t = time.time()
@@ -153,7 +153,7 @@ class PPOTrainer:
             random.shuffle(idxs)
             for i in range(bs):
                 idx = idxs[i]
-                train_stats = self.train_minibatch(logprobs[idx].unsqueeze(0), values[idx].unsqueeze(0),
+                train_stats = self.train_minibatch(logprobs[idx].unsqueeze(0), values[idx].unsqueeze(0),  #train_minibatch会执行多次，每次中都是相同的logprobs，这就是old_logprobs
                                                    rewards[idx].unsqueeze(0), queries[idx].unsqueeze(0),
                                                    responses[idx].unsqueeze(0),
                                                    torch.cat([queries[idx],responses[idx]]).unsqueeze(0))
@@ -183,7 +183,7 @@ class PPOTrainer:
     def batched_forward_pass(self, queries, responses):
         """Calculate model outputs in multiple batches."""
         bs = self.ppo_params['batch_size']
-        fbs = self.ppo_params['forward_batch_size']
+        fbs = self.ppo_params['forward_batch_size'] #目的单纯是防止爆显存
         all_logprobs = []
         all_ref_logprobs = []
         all_values = []
@@ -193,16 +193,19 @@ class PPOTrainer:
             response_batch = responses[i*fbs:(i+1)*fbs]
             input_ids = self.data_collator([torch.cat([q, r]) for q, r in zip(query_batch, response_batch)])["input_ids"]
             with torch.no_grad():
-                logits, _, v = self.model(input_ids)     #[ ]为什么input是query+response     # logits -> (batch, max_input_len, vocab_size); v -> (batch, max_input_len)   其中max_input_len是padding后的输入序列长度，因为语言模型会为每一个token都对应一个输出
+                logits, _, v = self.model(input_ids)     #[ ]这里query部分也有对应输出    # logits -> (batch, max_input_len, vocab_size); v -> (batch, max_input_len)   其中max_input_len是padding后的输入序列长度，因为语言模型会为每一个token都对应一个输出
                 ref_logits, _, _ = self.ref_model(input_ids)  #注意这里的model和ref_model都是添加了Value_head的处理，输出的v：returns a scalar for each output token
-            logprobs = logprobs_from_logits(logits[:,:-1,:], input_ids[:,1:])           # (batch, seq_len - 1) 每一个元素是句子当前位置应该预测的正确token的概率
+            logprobs = logprobs_from_logits(logits[:,:-1,:], input_ids[:,1:])           # (batch, seq_len - 1)  #[ ]这里的两个切片原因是：位置0的预测结果应该与位置1的实际token匹配，因为模型预测的是下一个token，为了让两个序列相应位置对齐，所以切片。
             ref_logprobs = logprobs_from_logits(ref_logits[:,:-1,:], input_ids[:,1:])   # (batch, seq_len - 1)
             for j in range(fbs):
                 start = len(query_batch[j]) - 1                                         # 拿到模型生成部分的信息（去掉prompt部分的信息）
+                        # 这里为什么-1：- 如果query长度为L，那么query的最后一个token的索引是L-1
+                                    # - 这个位置的logprob对应的是预测response第一个token的概率
+                                    # - 所以我们需要从L-1开始，才能正确获取生成部分的logprobs
                 end = start + len(response_batch[j])
-                all_values.append(v[j, start:end])    #[ ]                              # 生成的tokens的value [16]
-                all_logprobs.append(logprobs[j, start:end])                             # 生成的tokens的概率   [16]
-                all_ref_logprobs.append(ref_logprobs[j, start:end])                     # ref model生成的tokens的概率 [16]
+                all_values.append(v[j, start:end])                                      # 生成的tokens的value 
+                all_logprobs.append(logprobs[j, start:end])                             # 生成的tokens的概率  
+                all_ref_logprobs.append(ref_logprobs[j, start:end])                     # ref model生成的tokens的概率 
         return all_logprobs, all_ref_logprobs, all_values
                              # [1,16]   [1,16]   [1,16]  
     def train_minibatch(self, logprobs, values, rewards, query, response, model_input):  #相当于一次完整的路径采样的结果
@@ -215,14 +218,15 @@ class PPOTrainer:
         return train_stats
 
     def compute_rewards(self, scores, logprobs, ref_logprobs): #分别为长度128的列表
-        """Compute per token rewards from scores and KL-penalty."""
-        rewards, non_score_rewards = [], []
+        """Compute per token rewards from scores and KL-penalty.  这里算的是产出每个token的即时奖励"""
+        rewards, non_score_rewards = [], []  # [B,gen_len]
         for score, logprob, ref_logprob in zip(scores, logprobs, ref_logprobs):  # score: [1]; logprob:[16]; ref_logprobs:[16]
             kl = logprob - ref_logprob                    #kl = log(p/q) = log_p - log_q     # (gen_len, )  #[ ]因为我们计算的是采取action的KL，所以在每个位置计算的不是两个模型完整预测词表的概率分布的KL，而是将ref_model视为一个标准，让actor预测的token概率尽量和ref_model靠近，所以只看该token的预测概率
-            non_score_reward = -self.kl_ctl.value * kl    #[ ]对每个位置：actor预测的token和ref_model越靠近，是应该被鼓励的，reward相对应该越大。    # (gen_len, )
+             #TODO 大模型说这样计算kl是一种简化。
+            non_score_reward = -self.kl_ctl.value * kl    #[ ]对每个位置：actor预测的token和ref_model越靠近，是应该被鼓励的，reward相对应该越大。  # (gen_len, )
             non_score_rewards.append(non_score_reward)
             reward = non_score_reward.clone()                                          # 前面每一个token的reward都来自KL惩罚
-            reward[-1] += score                                                        #[ ] 在最后一位加上整个句子的得分total Reward
+            reward[-1] += score                                                        #[ ] 在最后一个token加上整个句子的得分total Reward
             rewards.append(reward)
         return rewards, non_score_rewards                                              # 128个 [gen_len, ]
 
@@ -239,7 +243,7 @@ class PPOTrainer:
             advantages_reversed.append(lastgaelam)
         advantages = torch.stack(advantages_reversed[::-1]).transpose(0, 1) #[x] 得到每个路径的advantage
 
-        returns = advantages + values          #TODO??                                     # (batch, generated_seq_len)
+        returns = advantages + values          #TODO 被用来训练价值网络      # (batch, generated_seq_len)
         advantages = whiten(advantages)
         advantages = advantages.detach()       #[ ]公式中advantage是作为一个常数乘在梯度里的，但是得到它的过程是建立了梯度关系的，所以要detach掉，这也意味着有些量需要重新进行前向计算，建立梯度图，然后才能根据Loss计算进行BP
 
@@ -253,7 +257,7 @@ class PPOTrainer:
                                      values - self.ppo_params["cliprange_value"],
                                      values + self.ppo_params["cliprange_value"])
 
-        vf_losses1 = (vpred - returns)**2                                           # value loss = v - (r + gamma * n_next)
+        vf_losses1 = (vpred - returns)**2                                           #TODO value loss = v - (r + gamma * v_next)
         vf_losses2 = (vpredclipped - returns)**2                                    # value loss clipped
         vf_loss = .5 * torch.mean(torch.max(vf_losses1, vf_losses2))   #[ ]得到value loss
         vf_clipfrac =  torch.mean(torch.gt(vf_losses2, vf_losses1).double())
